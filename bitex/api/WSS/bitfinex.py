@@ -163,6 +163,7 @@ class BitfinexWSS(WSSAPI):
         if time.time() - self.ping_timer > self.timeout:
             raise TimeoutError("Ping Command timed out!")
 
+
     def pause(self):
         """
         Pauses the client
@@ -209,8 +210,11 @@ class BitfinexWSS(WSSAPI):
         else:
             log.info("BitfinexWSS.start(): Thread not started! "
                      "self.processing_thread is populated!")
-
-        self.setup_subscriptions()
+        try:
+            self.setup_subscriptions()
+        except OSError:
+            self._controller_q.put('restart')
+            time.sleep(3)
 
     def stop(self):
         """
@@ -218,6 +222,8 @@ class BitfinexWSS(WSSAPI):
         :return:
         """
         super(BitfinexWSS, self).stop()
+
+        self.ping_timer= None
 
         log.info("BitfinexWSS.stop(): Stopping client..")
 
@@ -258,6 +264,11 @@ class BitfinexWSS(WSSAPI):
         to all channels which it was previously subscribed to.
         :return:
         """
+        if not self.running:
+            log.warning("BitfinexWSS.restart(): Restarting failed thread not running...")
+
+            return
+
         log.info("BitfinexWSS.restart(): Restarting client..")
         super(BitfinexWSS, self).restart()
 
@@ -284,22 +295,28 @@ class BitfinexWSS(WSSAPI):
             if self._receiver_lock.acquire(blocking=False):
                 try:
                     raw = self.conn.recv()
+                    msg = time.time(), json.loads(raw)
+
+                    log.debug("receiver Thread: Data Received: %s", msg)
+                    self.receiver_q.put(msg)
+                    self._receiver_lock.release()
+
                 except WebSocketTimeoutException:
                     self._receiver_lock.release()
                     continue
-                except WebSocketConnectionClosedException:
+                except (BlockingIOError,WebSocketConnectionClosedException,ConnectionResetError):
                     # this needs to restart the client, while keeping track
                     # of the currently subscribed channels!
                     self.conn = None
                     self._controller_q.put('restart')
+                    time.sleep(3)
                 except AttributeError:
                     # self.conn is None, idle loop until shutdown of thread
                     self._receiver_lock.release()
                     continue
-                msg = time.time(), json.loads(raw)
-                log.debug("receiver Thread: Data Received: %s", msg)
-                self.receiver_q.put(msg)
-                self._receiver_lock.release()
+
+
+
             else:
                 # The receiver_lock was locked, idling until available
                 time.sleep(0.5)
@@ -320,13 +337,18 @@ class BitfinexWSS(WSSAPI):
                     except TimeoutError:
                         log.exception("BitfinexWSS.ping(): TimedOut! (%ss)" %
                                       self.ping_timer)
+                        self.conn = None
                     except (WebSocketConnectionClosedException,
                             ConnectionResetError):
                         log.exception("BitfinexWSS.ping(): Connection Error!")
                         self.conn = None
                 if not self.conn:
                     # The connection was killed - initiate restart
+                    log.info("restart")
                     self._controller_q.put('restart')
+                    time.sleep(3)
+                    self._processor_lock.release()
+                    return
 
                 skip_processing = False
 
@@ -340,7 +362,10 @@ class BitfinexWSS(WSSAPI):
                 if not skip_processing:
                     log.debug("Processing Data: %s", data)
                     if isinstance(data, list):
-                        self.handle_data(ts, data)
+                        try:
+                            self.handle_data(ts, data)
+                        except NotRegisteredError:
+                            pass
                     else:  # Not a list, hence it could be a response
                         try:
                             self.handle_response(ts, data)
@@ -357,8 +382,11 @@ class BitfinexWSS(WSSAPI):
                             log.info("processor Thread: Connection Was reset, "
                                      "initiating restart")
                             self._controller_q.put('restart')
+                try:
+                    self._check_heartbeats(ts)
+                except Exception as e:
+                    log.error(e)
 
-                self._check_heartbeats(ts)
                 self._processor_lock.release()
             else:
                 time.sleep(0.5)
@@ -377,6 +405,8 @@ class BitfinexWSS(WSSAPI):
         """
         log.info("handle_response: Handling response %s", resp)
         event = resp['event']
+        log.info(ts)
+        log.info(event)
         try:
             self._event_handlers[event](ts, **resp)
         # Handle Non-Critical Errors
@@ -443,6 +473,8 @@ class BitfinexWSS(WSSAPI):
 
         self.channel_labels[chanId] = (channel_key, kwargs)
 
+
+
     def _handle_unsubscribed(self, *args, chanId=None, **kwargs):
         """
         Handles responses to unsubscribe() commands - removes a channel id from
@@ -506,15 +538,18 @@ class BitfinexWSS(WSSAPI):
         except KeyError:
             raise UnknownWSSInfo(output_msg)
 
-    def _handle_pong(self, ts, *args, **kwargs):
+    def _handle_pong(self, *args, **kwargs):
         """
         Handles pong messages; resets the self.ping_timer variable and logs
         info message.
         :param ts: timestamp, declares when data was received by the client
         :return:
         """
+        ts = kwargs['ts']
+        # log.info("BitfinexWSS.ping(): Ping received! (%ss)",
+        #          ts - self.ping_timer)
         log.info("BitfinexWSS.ping(): Ping received! (%ss)",
-                 ts - self.ping_timer)
+                 ts - args[0]*100)
         self.ping_timer = None
 
     def _handle_conf(self, ts, *args, **kwargs):
@@ -725,9 +760,9 @@ class BitfinexWSS(WSSAPI):
         self.config(decimals_as_strings=True)
         for pair in self.pairs:
             self.ticker(pair)
-            self.ohlc(pair)
-            self.order_book(pair)
-            self.raw_order_book(pair)
+            # self.ohlc(pair)
+            # self.order_book(pair)
+            # self.raw_order_book(pair)
             self.trades(pair)
 
     def config(self, decimals_as_strings=True, ts_as_dates=False,

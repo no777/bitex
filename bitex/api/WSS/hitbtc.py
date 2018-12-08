@@ -79,6 +79,7 @@ class HitBTCWSS(WSSAPI):
                 endpoint = 'MarketDataSnapshotFullRefresh'
             self.data_q.put((endpoint, pair, data[endpoint], time.time()))
 
+
     def _trade_thread(self):
         try:
             conn = create_connection(self.trader_addr)

@@ -59,7 +59,7 @@ class WSSAPI:
         Stops Threads. Overwrite this in your child class as necessary.
         :return:
         """
-        log.debug("WSSAPI.stop(): Stopping..")
+        log.info("WSSAPI.stop(): Stopping..")
         self.running = False
 
     def restart(self):
